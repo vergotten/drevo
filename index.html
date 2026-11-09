@@ -62,7 +62,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 #chip{position:fixed;left:10px;right:64px;bottom:calc(14px + var(--sb));z-index:15;display:flex;gap:6px;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:6px 6px 6px 12px;box-shadow:var(--shadow);font-size:14px;max-width:420px}
 #chip span{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #chip button{border:0;background:var(--bg);border-radius:8px;width:32px;height:32px;color:var(--accent)}
-.more.up{color:var(--muted);font-size:12px}
+.more{z-index:2} .more.up{color:var(--muted);font-size:12px}
 #depth button{border:0;background:none;width:28px;height:28px;font-size:18px;color:var(--accent)}
 #depth b{color:var(--ink);min-width:12px;text-align:center}
 
@@ -79,6 +79,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .p-sub{color:var(--muted);font-size:14px;margin-bottom:12px}
 .facts{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:15px;margin:10px 0 14px}
 .facts dt{color:var(--muted)} .facts dd{margin:0}
+.notes a{color:var(--accent);word-break:break-all}
 .notes{font-size:15px;line-height:1.5;white-space:pre-wrap;background:var(--bg);border-radius:10px;padding:10px 12px;margin:0 0 14px}
 .sec{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:16px 0 6px}
 .rel{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 45%,transparent);width:100%;background:none;border-left:0;border-right:0;border-top:0;text-align:left}
@@ -113,8 +114,8 @@ button{font:inherit;color:inherit;cursor:pointer}
 <section id="start">
   <svg class="tree-glyph" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="32" cy="12" r="6"/><circle cx="14" cy="34" r="6"/><circle cx="50" cy="34" r="6"/><circle cx="32" cy="54" r="6"/><path d="M32 18v8M14 28v-2h36v2M32 26v22M20 34h24"/></svg>
   <h1>Древо</h1>
-  <p>Откройте файл экспорта <b>.at5</b> из программы «Древо Жизни» — родословная построится прямо на телефоне. Файл никуда не отправляется.</p>
-  <button class="btn" id="pick">Открыть файл .at5</button>
+  <p>Откройте файл <b>.at5</b> или <b>.atdb</b> из программы «Древо Жизни» — родословная построится прямо на телефоне. Файл никуда не отправляется.</p>
+  <button class="btn" id="pick">Открыть файл .at5 / .atdb</button>
   <input type="file" id="file" class="hidden">
   <div id="status"></div>
 </section>
@@ -391,21 +392,34 @@ function txt(vstr, vblob){
   return "";
 }
 
+/* Supports both formats:
+   .at5  — older "Древо Жизни" export (Persons.birth_id/death_id, ValuesStr.vblob, Places as one string)
+   .atdb — newer format (birth/death via event roles, DocumentDetails.ismain, place hierarchy) */
+function cols(t){ try { return new Set(rows(`pragma table_info([${t}])`).map(r=>r[1])); } catch(e){ return new Set(); } }
 function parse(){
   const P = new Map();
-  for (const [id, sex, birth, death] of rows("select id,sex,birth_id,death_id from Persons"))
+  const cP = cols("Persons"), cS = cols("ValuesStr"), cD = cols("ValuesDates"), cDD = cols("DocumentDetails"), cPl = cols("Places");
+  const hasBD = cP.has("birth_id") && cP.has("death_id");
+  for (const [id, sex, birth, death] of rows(`select id,sex,${hasBD?"birth_id,death_id":"null,null"} from Persons`))
     P.set(id, { id, sex: sex===1?"m":sex===2?"f":"u", birth, death,
       surname:"", alt:"", name:"", patr:"", occ:"", note:"", place:null, photo:null, docs:[],
       fathers:[], mothers:[], adoptive:[], children:[], spouses:new Map() });
 
   // strings
   const S = {13:new Map(),14:new Map(),7:new Map(),4:new Map()};
-  for (const [f, t, r, vs, vb] of rows("select f_id,rec_table,rec_id,vstr,vblob from ValuesStr where rec_table in (4,7,13,14)")) {
+  for (const [f, t, r, vs, vb] of rows(`select f_id,rec_table,rec_id,vstr,${cS.has("vblob")?"vblob":"null"} from ValuesStr where rec_table in (4,7,13,14)`)) {
     const m = S[t]; if (!m.has(r)) m.set(r, {}); const o = m.get(r);
     const v = txt(vs, vb); if (v) o[f] = o[f] ? o[f] + "\n" + v : v;
   }
   const places = new Map();
-  for (const [id] of rows("select id from Places")) { const o = S[14].get(id) || {}; places.set(id, (o[93] || o[94] || o[91] || "").replace(/\s+/g," ").replace(/\s,/g,",").trim()); }
+  const plName = new Map(), plParent = new Map();
+  for (const [id, par] of rows(`select id,${cPl.has("parent_id")?"parent_id":"null"} from Places`)) {
+    const o = S[14].get(id) || {}; plName.set(id, (o[93] || o[94] || o[91] || "").replace(/\s+/g," ").replace(/\s,/g,",").trim()); plParent.set(id, par); }
+  for (const id of plName.keys()) {           // "Михайловское, Псковская губерния, Российская империя"
+    const parts = [], seen = new Set(); let cur = id;
+    while (cur != null && plName.has(cur) && !seen.has(cur) && parts.length < 4) { seen.add(cur); const n = plName.get(cur); if (n && !parts.includes(n)) parts.push(n); cur = plParent.get(cur); }
+    places.set(id, parts.join(", "));
+  }
 
   for (const [id, o] of S[13]) { const p = P.get(id); if (!p) continue;
     p.surname=o[64]||""; p.alt=o[65]||""; p.name=o[66]||""; p.patr=o[67]||""; p.occ=o[73]||""; p.note=o[89]||""; }
@@ -420,7 +434,7 @@ function parse(){
   }
   // dates
   const evDate = new Map(), docDate = new Map();
-  for (const [f, t, r, d, m, y, d2, m2, y2, type, sd] of rows("select f_id,rec_table,rec_id,d,m,y,d2,m2,y2,type,sortdate from ValuesDates")) {
+  for (const [f, t, r, d, m, y, d2, m2, y2, type, sd] of rows(`select f_id,rec_table,rec_id,d,m,y,d2,m2,y2,type,${cD.has("sortdate")?"sortdate":cD.has("sort")?"sort":"null"} from ValuesDates`)) {
     const v = { d, m, y, d2, m2, y2, type, sort: sd || (y? y*10000:0) };
     if (t===7) evDate.set(r, v); else if (t===4) docDate.set(r, v);
   }
@@ -428,7 +442,7 @@ function parse(){
   const events = new Map();
   for (const [id, et] of rows("select id,et_id from Events")) {
     const o = S[7].get(id) || {};
-    events.set(id, { id, et, date: evDate.get(id)||null, place: evPlace.get(id)||"", cause: o[38]||"", desc: o[27]||"", roles:[] });
+    events.set(id, { id, et, date: evDate.get(id)||null, place: evPlace.get(id)||"", cause: o[38]||"", desc: [o[27],o[37]].filter(Boolean).join("\n"), roles:[] });
   }
   for (const [p, e, r] of rows("select p_id,e_id,er_id from EventDetails order by e_id,p_ord")) {
     const ev = events.get(e); if (ev && P.has(p)) ev.roles.push([r, p]);
@@ -436,8 +450,9 @@ function parse(){
   const marriages = [];
   for (const ev of events.values()) {
     const who = r => ev.roles.filter(x=>x[0]===r).map(x=>x[1]);
+    if (ev.et===2) for (const d of who(4)) { const pp=P.get(d); if (pp.death==null) pp.death = ev.id; }
     if (ev.et===1) {               // birth: 1 child, 2 father, 3 mother
-      for (const c of who(1)) { const ch=P.get(c);
+      for (const c of who(1)) { const ch=P.get(c); if (ch.birth==null) ch.birth = ev.id;
         for (const f of who(2)) if (!ch.fathers.includes(f)) ch.fathers.push(f);
         for (const m of who(3)) if (!ch.mothers.includes(m)) ch.mothers.push(m); }
     } else if (ev.et===8) {        // adoption: 9 child, 10/11 adoptive parents
@@ -459,8 +474,9 @@ function parse(){
   const docs = new Map();
   for (const [id, title, has] of rows("select d.id, (select vstr from ValuesStr v where v.rec_table=4 and v.rec_id=d.id and v.f_id=9), preview is not null and length(preview)>0 from Documents d"))
     docs.set(id, { id, title: title||"", has: !!has, date: docDate.get(id)||null, place: docPlace.get(id)||"" });
-  for (const [d, r] of rows("select d_id,rec_id from DocumentDetails where rec_table=13 order by rec_id, r_ord, d_ord")) {
-    const p = P.get(r), doc = docs.get(d); if (p && doc && doc.has && !p.docs.includes(d)) p.docs.push(d);
+  const ordCol = cDD.has("r_ord") ? "r_ord" : cDD.has("rec_ord") ? "rec_ord" : "id";
+  for (const [d, r, main] of rows(`select d_id,rec_id,${cDD.has("ismain")?"ismain":"0"} from DocumentDetails where rec_table=13 order by rec_id, ${ordCol}, d_ord`)) {
+    const p = P.get(r), doc = docs.get(d); if (p && doc && doc.has) { if (!p.docs.includes(d)) p.docs.push(d); if (main && !p.photo) p.photo = d; }
   }
   for (const p of P.values()) {
     if (p.photo && !(docs.get(p.photo)||{}).has) p.photo = null;
@@ -692,7 +708,7 @@ function openPerson(id){
   if (p.occ) facts.push(["Занятие", p.occ]);
   if (facts.length) out.push(`<dl class="facts">${facts.map(([a,b])=>`<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("")}</dl>`);
   const notes = [p.note, p.dth && p.dth.desc && !(p.dth.cause && p.dth.desc.includes(p.dth.cause)) ? p.dth.desc : ""].filter(Boolean).join("\n\n");
-  if (notes) out.push(`<div class="notes">${esc(notes)}</div>`);
+  if (notes) out.push(`<div class="notes">${esc(notes).replace(/https?:\/\/[^\s<]+/g, u=>`<a href="${u}" target="_blank" rel="noopener">${u.length>48?u.slice(0,45)+"…":u}</a>`)}</div>`);
 
   const par = [...p.fathers.map(x=>[x,"отец"]), ...p.mothers.map(x=>[x,"мать"]), ...p.adoptive.map(x=>[x, P.get(x)?.sex==="f"?"приёмная мать":"приёмный отец"])];
   if (par.length) out.push(`<div class="sec">Родители</div>` + par.map(([x,l])=>relRow(x,l)).join(""));
@@ -778,7 +794,7 @@ $("file").onchange = async e=>{ const f = e.target.files[0]; e.target.value=""; 
 
 async function load(buf){
   try {
-    if (String.fromCharCode(...buf.slice(0,15)) !== "SQLite format 3") throw new Error("Это не файл .at5 «Древа Жизни» (ожидается база SQLite).");
+    if (String.fromCharCode(...buf.slice(0,15)) !== "SQLite format 3") throw new Error("Это не файл .at5/.atdb «Древа Жизни» (ожидается база SQLite).");
     setStatus("Открываю базу…"); await initSql();
     if (DB) { DB.close(); for (const u of urlCache.values()) if(u) URL.revokeObjectURL(u); urlCache.clear(); }
     DB = new SQL.Database(buf);
